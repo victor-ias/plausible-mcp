@@ -47,11 +47,13 @@ describe("MCP Server Integration", () => {
     await client.close();
   });
 
-  it("lists all 4 tools", async () => {
+  it("lists all 6 tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "check_tracking_health",
       "compare_periods",
+      "detect_anomaly",
       "get_breakdown",
       "get_conversions",
       "get_timeseries",
@@ -338,6 +340,8 @@ describe("MCP HTTP protocol eras", () => {
         "get_breakdown",
         "get_conversions",
         "compare_periods",
+        "detect_anomaly",
+        "check_tracking_health",
       ]);
     } finally {
       await modernClient.close();
@@ -355,7 +359,7 @@ describe("MCP HTTP protocol eras", () => {
       await legacyClient.connect(transport);
       expect(legacyClient.getProtocolEra()).toBe("legacy");
       const { tools } = await legacyClient.listTools();
-      expect(tools).toHaveLength(4);
+      expect(tools).toHaveLength(6);
     } finally {
       await legacyClient.close();
     }
