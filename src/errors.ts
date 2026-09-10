@@ -5,7 +5,9 @@ export type ToolName =
   | "get_timeseries"
   | "get_breakdown"
   | "get_conversions"
-  | "compare_periods";
+  | "compare_periods"
+  | "detect_anomaly"
+  | "check_tracking_health";
 
 export class UserFacingError extends Error {
   constructor(message: string) {
