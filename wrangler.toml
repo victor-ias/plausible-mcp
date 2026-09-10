@@ -1,45 +1,38 @@
 name = "plausible-mcp"
-# Sentry Internal. Pinned so a deploy can't land in another account by accident.
-account_id = "20d94f53c7cab0b469521b703ff1923c"
 main = "src/worker.ts"
 compatibility_date = "2025-01-01"
-# nodejs_compat_v2: Node built-ins for the SDK. global_fetch_strictly_public: hardens
-# the JWKS fetch — fetch() can only reach public addresses, blocking SSRF.
+workers_dev = true
+
+# nodejs_compat_v2: Node built-ins for the SDK. global_fetch_strictly_public:
+# fetch() can only reach public addresses, blocking SSRF.
 compatibility_flags = ["nodejs_compat_v2", "global_fetch_strictly_public"]
 
-routes = [
-  { pattern = "plausible-mcp.sentry.dev", custom_domain = true }
-]
-
 [vars]
-# Email domain(s) allowed to sign in to /internal (comma-separated, "@" optional).
-# Enforced in code in ADDITION to the upstream Access policy. Self-hosting? Set your own.
-ALLOWED_EMAIL_DOMAIN = "sentry.io"
-# Access service-token client IDs allowed on /internal without a user identity
-# (comma-separated). Not secrets — identifiers; the matching Access policy still
-# requires the token's secret. Currently: the "junior-plausible-mcp" token.
-ALLOWED_SERVICE_TOKEN_IDS = "f2fb6d108dd50696e67d022c4eaa2c5f.access"
-# Hostnames accepted by the MCP endpoints (port-agnostic). Keep localhost for wrangler dev.
-MCP_ALLOWED_HOSTNAMES = "plausible-mcp.sentry.dev,localhost,127.0.0.1"
-# Browser origins allowed to call /internal. Non-browser clients send no Origin header.
-MCP_ALLOWED_ORIGIN_HOSTNAMES = "claude.ai,localhost,127.0.0.1"
-# Cloudflare Access team domain — verifies the Cf-Access-Jwt-Assertion JWKS + issuer.
-# Not a secret (public JWKS URL); must match the team the Access app lives in. No slash.
-CF_ACCESS_TEAM_DOMAIN = "https://sentry-internal.cloudflareaccess.com"
-# The Access application's Application Audience (AUD) tag — checked against the token
-# `aud`. Not a secret (an app identifier, not a credential).
-CF_ACCESS_AUD = "163ce3b13ebe967295ffdf932b5699a2202de3a650684c87f61d5076eb6735c4"
+# Only verified users with an @inappstory.com address may use /internal.
+ALLOWED_EMAIL_DOMAIN = "inappstory.com"
+
+# No machine/service-token access is enabled.
+ALLOWED_SERVICE_TOKEN_IDS = ""
+
+# Expected Workers.dev hostname plus local development.
+MCP_ALLOWED_HOSTNAMES = "plausible-mcp.victor-a1c.workers.dev,localhost,127.0.0.1"
+
+# Browser origins allowed to call /internal. Non-browser MCP clients omit Origin.
+MCP_ALLOWED_ORIGIN_HOSTNAMES = "chatgpt.com,localhost,127.0.0.1"
+
+# Replace both placeholders after creating the Cloudflare Access application.
+# These values are public identifiers, not secrets.
+CF_ACCESS_TEAM_DOMAIN = "https://REPLACE_WITH_TEAM.cloudflareaccess.com"
+CF_ACCESS_AUD = "REPLACE_WITH_ACCESS_AUD"
+
+# Set the Plausible key out-of-band; never commit it:
+#   wrangler secret put PLAUSIBLE_API_KEY
+#
+# Do not set SENTRY_DSN for the initial deployment. This keeps tool inputs,
+# outputs, site IDs, filters, and user identities out of Sentry telemetry.
 
 [dev]
 port = 8787
-
-# With Managed OAuth, Cloudflare Access runs the OAuth server; the Worker only verifies
-# the assertion Access injects, so no OAuth client id/secret, cookie key, or KV is needed.
-# The one true secret is the shared Plausible key — set it out-of-band, not in this file:
-#   wrangler secret put PLAUSIBLE_API_KEY
-# Optional: the Worker's own Sentry telemetry. Deliberately a secret rather than a var so
-# forks of this repo don't report into someone else's Sentry project. Unset = SDK disabled.
-#   wrangler secret put SENTRY_DSN
 
 [[unsafe.bindings]]
 name = "RATE_LIMITER"
