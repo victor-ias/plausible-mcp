@@ -14,6 +14,9 @@ PLAUSIBLE_DEFAULT_SITE_ID = "inappstory.com"
 # Only verified Google users with an @inappstory.com address may use /internal.
 ALLOWED_EMAIL_DOMAIN = "inappstory.com"
 
+# Public identifier for the Google OAuth Web application.
+GOOGLE_CLIENT_ID = "309466244835-b8jmv00rl1n0u05pb2rkdn3gsptd1fol.apps.googleusercontent.com"
+
 # Expected Workers.dev hostname plus local development.
 MCP_ALLOWED_HOSTNAMES = "plausible-mcp.victor-a1c.workers.dev,localhost,127.0.0.1"
 MCP_PUBLIC_URL = "https://plausible-mcp.victor-a1c.workers.dev"
