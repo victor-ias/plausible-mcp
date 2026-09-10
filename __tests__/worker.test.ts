@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import * as Sentry from "@sentry/cloudflare";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
   verifyCloudflareAccessJwt,
@@ -7,7 +8,11 @@ import {
   parseAllowedServiceTokenIds,
   type AccessConfig,
 } from "../src/cf-access.js";
-import instrumentedWorker, { workerHandler } from "../src/worker.js";
+import instrumentedWorker, {
+  googleMcpHandler,
+  sentryConfig,
+  workerHandler,
+} from "../src/worker.js";
 import type { Env } from "../src/env.js";
 
 const TEAM_DOMAIN = "https://sentry.cloudflareaccess.com";
@@ -558,16 +563,11 @@ describe("MCP Worker entry", () => {
   });
 
   it("keeps Sentry tool spans and recordToolIO gating on modern requests", async () => {
-    clearCertsCache();
-    const { jwt, jwk } = await makeValidJwt();
     const envelopes: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init);
       const url = new URL(request.url);
 
-      if (url.pathname === "/cdn-cgi/access/certs") {
-        return new Response(JSON.stringify({ keys: [jwk] }), { status: 200 });
-      }
       if (url.hostname === "plausible.io") {
         return new Response(JSON.stringify({
           results: [{ dimensions: ["2026-07-30"], metrics: [10, 20, 30, 40] }],
@@ -588,21 +588,23 @@ describe("MCP Worker entry", () => {
         pending.push(promise);
       },
       passThroughOnException() {},
-      props: {},
+      props: { email: "user@inappstory.com", name: "Test User" },
     } as ExecutionContext;
     const env = {
       ...WORKER_ENV,
+      ALLOWED_EMAIL_DOMAIN: "inappstory.com",
       PLAUSIBLE_API_KEY: "shared-test-key",
       SENTRY_DSN: "https://public@sentry.example/1",
     } satisfies Env;
+    const instrumentedGoogleHandler = Sentry.withSentry(sentryConfig, googleMcpHandler);
     const transport = new StreamableHTTPClientTransport(
       new URL("https://test.local/internal"),
       {
-        requestInit: { headers: { "Cf-Access-Jwt-Assertion": jwt } },
+        requestInit: { headers: { Authorization: "Bearer oauth-test-token" } },
         fetch: (url, init) => {
           const request = new Request(url, init);
           request.headers.set("Host", new URL(request.url).host);
-          return instrumentedWorker.fetch!(request, env, ctx);
+          return instrumentedGoogleHandler.fetch!(request, env, ctx);
         },
       },
     );
@@ -629,7 +631,7 @@ describe("MCP Worker entry", () => {
     expect(recorded).toContain('"mcp.client.name":"sentry-modern-test"');
     expect(recorded).toContain('"mcp.request.argument.site_id":"\\"example.com\\""');
     expect(recorded).toContain('"mcp.tool.result.content":');
-    expect(recorded).not.toContain(jwt);
+    expect(recorded).not.toContain("oauth-test-token");
     expect(recorded).not.toContain("shared-test-key");
 
     envelopes.length = 0;

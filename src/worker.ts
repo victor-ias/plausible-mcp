@@ -8,10 +8,11 @@ import {
 } from "@modelcontextprotocol/server";
 import { createServer } from "./server.js";
 import {
+  handleGoogleOAuth,
+  isAllowedEmail,
   parseAllowedEmailDomains,
-  parseAllowedServiceTokenIds,
-  verifyCloudflareAccessJwt,
-} from "./cf-access.js";
+  type GoogleAuthProps,
+} from "./google-oauth.js";
 import { anonymizeEventWithoutEmail, stripRequestAttributes } from "./redaction.js";
 import {
   classifyMcpMethod,
@@ -159,7 +160,7 @@ const workerMcpHandler = createMcpHandler(
   { legacy: "stateless" },
 );
 
-function sentryConfig(env: Env): Sentry.CloudflareOptions {
+export function sentryConfig(env: Env): Sentry.CloudflareOptions {
   return {
     // Set out-of-band (`wrangler secret put SENTRY_DSN`), never hardcoded: this repo is
     // public and forks deploy it as-is, so a baked-in DSN makes every third-party
@@ -268,69 +269,6 @@ async function rateLimited(request: Request, env: Env): Promise<Response | null>
     JSON.stringify({ error: "Rate limit exceeded. Try again later." }),
     { status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" } },
   );
-}
-
-/**
- * Access-protected MCP endpoint (`/internal`) for managed connectors (e.g. Cowork).
- *
- * Cloudflare Access sits in front of this endpoint with Managed OAuth enabled: it runs
- * the OAuth 2.1 handshake with the client, then forwards each request to this origin
- * carrying a `Cf-Access-Jwt-Assertion` header. We verify that header (JWKS + RS256 +
- * aud/iss/exp + email-domain or service-token allowlist gate), then serve MCP against the shared server-side
- * Plausible API key. The Worker itself runs no OAuth server.
- */
-async function handleInternalMcp(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD) {
-    return jsonError("Server misconfigured: missing Cloudflare Access verification config.", 500);
-  }
-
-  const token = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!token) {
-    // No assertion means the request didn't come through Access — fail closed.
-    return jsonError("Forbidden: missing Cloudflare Access assertion.", 403);
-  }
-
-  const allowedEmailDomains = parseAllowedEmailDomains(env.ALLOWED_EMAIL_DOMAIN);
-  const identity = await verifyCloudflareAccessJwt(token, {
-    teamDomain: env.CF_ACCESS_TEAM_DOMAIN,
-    aud: env.CF_ACCESS_AUD,
-    allowedEmailDomains,
-    allowedServiceTokenIds: parseAllowedServiceTokenIds(env.ALLOWED_SERVICE_TOKEN_IDS),
-  });
-  if (!identity) {
-    return jsonError(
-      `Forbidden: a valid identity in an allowed domain (${allowedEmailDomains.join(", ")}) is required.`,
-      403,
-    );
-  }
-
-  const subject = identity.kind === "user" ? identity.email : identity.clientId;
-  Sentry.setUser(
-    identity.kind === "user" ? { email: identity.email } : { username: identity.clientId },
-  );
-
-  if (!env.PLAUSIBLE_API_KEY) {
-    return jsonError("Server misconfigured: missing shared Plausible API key.", 500);
-  }
-
-  const authInfo = buildAuthInfo(token, subject, {
-    apiKey: env.PLAUSIBLE_API_KEY,
-    baseUrl: env.PLAUSIBLE_BASE_URL,
-    defaultSiteId: env.PLAUSIBLE_DEFAULT_SITE_ID,
-    // Record tool inputs/outputs into Sentry spans on /internal, attributed to the
-    // authenticated user via Sentry.setUser({ email }) above. This endpoint is
-    // SSO-gated and uses a shared server-side key, so per-user I/O gives us
-    // attribution/abuse-tracing on the shared quota. Recorded data is analytics query
-    // params (site ids, date ranges) and aggregate traffic numbers — not personal PII
-    // — and Authorization/Cookie/JWT headers are still stripped by the Sentry hooks.
-    // BYOK (/mcp) deliberately leaves this off: that traffic is a third party's own data.
-    recordToolIO: true,
-  });
-
-  return workerMcpHandler.fetch(request, { authInfo });
 }
 
 /**
@@ -448,8 +386,6 @@ const handler = {
     let response: Response;
     if (earlyResponse) {
       response = earlyResponse;
-    } else if (pathname === "/internal" || pathname.startsWith("/internal/")) {
-      response = await handleInternalMcp(request, env);
     } else if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
       response = await handleDirectMcp(request, env);
     } else {
@@ -462,5 +398,59 @@ const handler = {
   },
 } satisfies ExportedHandler<Env>;
 
+const googleMcpHandler = {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
+    const tracked = classifyRoute("/internal");
+    const clientFamily = resolveClientFamily(request.headers.get("User-Agent"));
+    const rejected = tracked
+      ? mcpRequestValidationResponse(request, env, tracked)
+      : undefined;
+    const limited = rejected ? null : await rateLimited(request, env);
+    const earlyResponse = rejected ?? limited;
+    const mcpRequest = earlyResponse || !tracked
+      ? null
+      : await inspectMcpRequest(request);
+
+    let response: Response;
+    if (earlyResponse) {
+      response = earlyResponse;
+    } else {
+      const props = ctx.props as GoogleAuthProps | undefined;
+      const allowedDomains = parseAllowedEmailDomains(env.ALLOWED_EMAIL_DOMAIN);
+      if (!props || !isAllowedEmail(props.email, allowedDomains)) {
+        response = jsonError("Forbidden: the authenticated Google account is not allowed.", 403);
+      } else if (!env.PLAUSIBLE_API_KEY) {
+        response = jsonError("Server misconfigured: missing shared Plausible API key.", 500);
+      } else {
+        Sentry.setUser({ email: props.email });
+        const bearerToken = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+        const authInfo = buildAuthInfo(bearerToken, props.email, {
+          apiKey: env.PLAUSIBLE_API_KEY,
+          baseUrl: env.PLAUSIBLE_BASE_URL,
+          defaultSiteId: env.PLAUSIBLE_DEFAULT_SITE_ID,
+          recordToolIO: true,
+        });
+        response = await workerMcpHandler.fetch(request, { authInfo });
+      }
+    }
+
+    recordResponseMetric(request, response, tracked, clientFamily, mcpRequest);
+    return corsResponse(response);
+  },
+} satisfies ExportedHandler<Env>;
+
+const oauthDefaultHandler = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const oauthResponse = await handleGoogleOAuth(request, env);
+    if (oauthResponse) return oauthResponse;
+    return handler.fetch(request, env, ctx);
+  },
+} satisfies ExportedHandler<Env>;
+
 export const workerHandler = { fetch: handler.fetch };
+export { googleMcpHandler, oauthDefaultHandler };
 export default Sentry.withSentry(sentryConfig, handler);
