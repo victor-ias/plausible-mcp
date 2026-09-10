@@ -20,6 +20,8 @@
     "__tests__",
     "evals",
     "src/worker.ts",
-    "src/env.ts"
+    "src/env.ts",
+    "src/google-oauth.ts",
+    "src/oauth-worker.ts"
   ]
 }

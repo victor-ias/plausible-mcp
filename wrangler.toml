@@ -1,7 +1,8 @@
 name = "plausible-mcp"
-main = "src/worker.ts"
+main = "src/oauth-worker.ts"
 compatibility_date = "2025-01-01"
 workers_dev = true
+preview_urls = false
 
 # nodejs_compat_v2: Node built-ins for the SDK. global_fetch_strictly_public:
 # fetch() can only reach public addresses, blocking SSRF.
@@ -10,28 +11,29 @@ compatibility_flags = ["nodejs_compat_v2", "global_fetch_strictly_public"]
 [vars]
 PLAUSIBLE_DEFAULT_SITE_ID = "inappstory.com"
 
-# Only verified users with an @inappstory.com address may use /internal.
+# Only verified Google users with an @inappstory.com address may use /internal.
 ALLOWED_EMAIL_DOMAIN = "inappstory.com"
-
-# No machine/service-token access is enabled.
-ALLOWED_SERVICE_TOKEN_IDS = ""
 
 # Expected Workers.dev hostname plus local development.
 MCP_ALLOWED_HOSTNAMES = "plausible-mcp.victor-a1c.workers.dev,localhost,127.0.0.1"
+MCP_PUBLIC_URL = "https://plausible-mcp.victor-a1c.workers.dev"
 
 # Browser origins allowed to call /internal. Non-browser MCP clients omit Origin.
 MCP_ALLOWED_ORIGIN_HOSTNAMES = "chatgpt.com,localhost,127.0.0.1"
 
-# Replace both placeholders after creating the Cloudflare Access application.
-# These values are public identifiers, not secrets.
-CF_ACCESS_TEAM_DOMAIN = "https://REPLACE_WITH_TEAM.cloudflareaccess.com"
-CF_ACCESS_AUD = "REPLACE_WITH_ACCESS_AUD"
-
 # Set the Plausible key out-of-band; never commit it:
 #   wrangler secret put PLAUSIBLE_API_KEY
+# Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the Cloudflare dashboard.
+# GOOGLE_CLIENT_SECRET and PLAUSIBLE_API_KEY must both use the Secret type.
 #
 # Do not set SENTRY_DSN for the initial deployment. This keeps tool inputs,
 # outputs, site IDs, filters, and user identities out of Sentry telemetry.
+
+# Create a Workers KV namespace in Cloudflare, then replace this placeholder
+# before merging the OAuth branch into main.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 [dev]
 port = 8787

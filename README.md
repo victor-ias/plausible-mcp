@@ -49,17 +49,17 @@ Or add manually to your MCP client config (Claude Desktop, Cursor, etc.):
 }
 ```
 
-**Sentry employees** (via OAuth 2.1 + Cloudflare Access):
+**InAppStory team** (via OAuth 2.1 + Google):
 
 The `/internal` endpoint is an OAuth 2.1 server — no API key needed. Add it as a remote/custom connector in any OAuth-capable MCP client (Cowork, Claude.ai connectors, Claude Desktop):
 
 ```
-https://plausible-mcp.sentry.dev/internal
+https://plausible-mcp.victor-a1c.workers.dev/internal
 ```
 
-The client discovers the OAuth endpoints automatically, sends you through Sentry SSO (Cloudflare Access), and only `@sentry.io` identities are granted access. Queries run against a shared, server-side Plausible API key — you never handle a key.
+The client discovers the OAuth endpoints automatically, sends you through Google sign-in, and only verified `@inappstory.com` identities are granted access. Queries run against a shared, server-side Plausible API key — the key is never sent to the client.
 
-> The **hosted** `/internal` at `plausible-mcp.sentry.dev` is Sentry-only and can't be used outside the org. To run `/internal` for a different organization, [self-host](#self-hosting-cloudflare-workers) and set `ALLOWED_EMAIL_DOMAIN` to your own domain. (The public `/mcp` bring-your-own-key endpoint has no such restriction.)
+> The public `/mcp` endpoint remains bring-your-own-key and does not use the server-side key. ChatGPT should connect to `/internal`.
 
 ### Local (STDIO)
 
@@ -108,45 +108,22 @@ npx wrangler deploy
 The worker exposes two endpoints:
 
 - **`/mcp`** — bring-your-own-key. Each user passes their own Plausible API key via the `Authorization: Bearer` header. No shared secrets needed on the server. Works with any header-capable MCP client (Claude Code, Cursor, MCP Inspector).
-- **`/internal`** — Access-protected MCP endpoint for managed connectors (Cowork, Claude.ai). A Cloudflare Access application with **Managed OAuth** fronts the **whole Worker hostname** (see the constraint below): Access runs the OAuth 2.1 handshake with the client and forwards each request to the Worker with a `Cf-Access-Jwt-Assertion` header. The Worker verifies that header and queries a shared, server-side Plausible API key. Access is gated to the email domain(s) in `ALLOWED_EMAIL_DOMAIN` (defaults to `sentry.io`) — **not** tied to Sentry when you self-host; set it to your own domain.
+- **`/internal`** — OAuth-protected endpoint for ChatGPT. The Worker acts as an OAuth 2.1 authorization server and delegates human sign-in to Google. It verifies `email_verified`, applies the exact domain allowlist in `ALLOWED_EMAIL_DOMAIN`, and then uses the shared server-side Plausible key.
 
-Because the Managed OAuth application must cover the **bare hostname with no path** (Cloudflare rejects a path when OAuth is enabled — `domain can not have a path if oauth is configured`), it also gates `/mcp`. To keep the bring-your-own-key `/mcp` endpoint public you add a **second, more-specific Access application scoped to the `/mcp` path with a `Bypass` policy**. Cloudflare matches the most specific hostname+path first, so `/mcp` requests bypass Access entirely while everything else goes through OAuth. Both apps live on one hostname; no separate subdomain is required.
+#### Setting up the `/internal` endpoint (Google OAuth)
 
-> **Beta / client requirement.** Cloudflare Access [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) is in Beta and **requires an MCP client that supports [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707)** (resource indicators). Confirm your connector supports it before relying on this path.
+1. Create a Workers KV namespace and bind it as `OAUTH_KV` in `wrangler.toml`. The OAuth provider stores tokens, rotating refresh tokens, grants, and short-lived Google state there.
+2. In Google Cloud, create an OAuth 2.0 **Web application** client. Add this exact authorized redirect URI:
+   `https://plausible-mcp.victor-a1c.workers.dev/oauth/google/callback`
+3. Add Worker variables/secrets in Cloudflare:
+   - `GOOGLE_CLIENT_ID` — the Google OAuth client ID.
+   - `GOOGLE_CLIENT_SECRET` — secret.
+   - `PLAUSIBLE_API_KEY` — secret used only by `/internal`.
+   - `ALLOWED_EMAIL_DOMAIN` — `inappstory.com` for this deployment.
+4. Deploy, then point ChatGPT at:
+   `https://plausible-mcp.victor-a1c.workers.dev/internal`
 
-#### Setting up the `/internal` endpoint (Cloudflare Access Managed OAuth)
-
-The Worker runs **no OAuth server** — Cloudflare Access is the authorization server. There is no `OAUTH_KV`, no cookie key, and no OAuth client id/secret. You create **two** Access applications on the same hostname.
-
-1. **Create the Managed OAuth application over the bare hostname** (Zero Trust → **Access** → Applications): a [self-hosted app](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) or [MCP server application](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/) whose domain is `plausible-mcp.sentry.dev` **with no path**.
-   - ⚠️ **Do not scope it to `/internal`.** Once Managed OAuth is enabled, Cloudflare rejects any path with `access.api.error.invalid_request: domain can not have a path if oauth is configured`. The app must be the whole host; the Worker enforces the `/internal` route itself.
-   - Add an Access **policy** (Action `Allow`) restricting to your email domain (e.g. `@acme.com`) and identity provider.
-   - **Enable Managed OAuth** (Advanced settings → **Managed OAuth**) and set **Allowed redirect URIs** to your connector's actual callback — for Claude/Cowork that is `https://claude.ai/api/mcp/auth_callback`. Public HTTPS callbacks **must** be listed or Dynamic Client Registration fails with `invalid_client_metadata: redirect_uri is not allowed by the account configuration`; loopback (`http://localhost:*`) callbacks are allowed by default.
-   - Copy the application's **AUD tag** → this becomes `CF_ACCESS_AUD`.
-2. **Carve `/mcp` back out with a second, path-scoped Bypass application.** Because step 1 covers the whole host, `/mcp` (bring-your-own-key) is now gated too. Create another self-hosted app, domain `plausible-mcp.sentry.dev` **path `mcp`**, with **Managed OAuth OFF**, and a policy whose **Action is `Bypass`** with the selector **`Everyone`**.
-   - `Bypass` ≠ `Allow`: an `Allow` policy still forces an interactive login (the client gets an HTML `302` to the login page and fails with `Unexpected content type: text/html`). Only `Bypass` lets the request through with no authentication, so the Worker's own Bearer-key check applies.
-3. **Set the worker secrets**:
-   ```bash
-   npx wrangler secret put PLAUSIBLE_API_KEY          # shared key for /internal queries
-   npx wrangler secret put SENTRY_DSN                 # optional — the Worker's own telemetry
-   ```
-   `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are **not** secrets — a public JWKS URL and an application identifier — so they go in `[vars]` in step 4.
-4. **Set the `[vars]` in `wrangler.toml`**:
-   - `CF_ACCESS_TEAM_DOMAIN` — `https://<team>.cloudflareaccess.com`, no trailing slash. Verifies the `Cf-Access-Jwt-Assertion` JWKS and issuer.
-   - `CF_ACCESS_AUD` — the AUD tag you copied in step 1.
-   - `ALLOWED_EMAIL_DOMAIN` — the email domain(s) allowed to sign in, comma-separated, `@` optional (default `sentry.io`). Enforced in code **in addition to** the Access policy in step 1, so set it to your own domain — otherwise every login is rejected.
-   - `MCP_ALLOWED_HOSTNAMES` — comma-separated hostnames accepted by the MCP endpoints. Replace `plausible-mcp.sentry.dev` with your worker's hostname; keep the localhost entries if you use `wrangler dev`.
-   - `MCP_ALLOWED_ORIGIN_HOSTNAMES` — comma-separated browser Origin hostnames allowed to call `/internal`. Non-browser clients do not send an `Origin` header.
-5. **Deploy** (`npx wrangler deploy`), then point an RFC 8707-capable MCP client at `https://<your-worker-host>/internal`.
-
-**Troubleshooting.** All of these are Cloudflare Access configuration, not the Worker — a request only reaches the Worker (and its Sentry spans) once Access forwards it:
-
-| Symptom (in the connector) | Cause | Fix |
-|---|---|---|
-| `Couldn't register … / add an OAuth Client ID` | Connector callback isn't in **Allowed redirect URIs** | Add the exact callback (step 1); read the rejected `redirect_uri` from Zero Trust → Logs → Access |
-| `domain can not have a path if oauth is configured` | Managed OAuth app scoped to a path | Rescope app 1 to the bare host (step 1) |
-| `/mcp`: `Unexpected content type: text/html` | `/mcp` app policy is `Allow`, not `Bypass` | Set the app-2 policy Action to `Bypass` (step 2) |
-| `/mcp`: OAuth `401 invalid_token` | No `/mcp` bypass app; the whole-host OAuth app is gating it | Create app 2 (step 2) |
+The Worker publishes OAuth authorization-server and protected-resource metadata, supports PKCE and ChatGPT Client ID Metadata Documents, and issues rotating refresh tokens through `@cloudflare/workers-oauth-provider`. Other OAuth clients and redirect domains fail closed.
 
 ## Configuration
 
@@ -155,14 +132,16 @@ The Worker runs **no OAuth server** — Cloudflare Access is the authorization s
 | `PLAUSIBLE_API_KEY` | Yes (STDIO; Worker `/internal`) | — | Your Plausible API key ([get one here](https://plausible.io/docs/stats-api)). On the Worker this is the shared key for `/internal`; `/mcp` takes each user's own key via Bearer. |
 | `PLAUSIBLE_BASE_URL` | No | `https://plausible.io` | URL of your Plausible instance (for self-hosted) |
 | `PLAUSIBLE_DEFAULT_SITE_ID` | No | — | Default site domain so you don't have to pass `site_id` every call |
-| `CF_ACCESS_TEAM_DOMAIN` | Yes (Worker `/internal`) | — | `https://<team>.cloudflareaccess.com` — verifies the `Cf-Access-Jwt-Assertion` JWKS + issuer. No trailing slash. |
-| `CF_ACCESS_AUD` | Yes (Worker `/internal`) | — | The Access application's Application Audience (AUD) tag — checked against the assertion's `aud`. |
+| `GOOGLE_CLIENT_ID` | Yes (Worker `/internal`) | — | OAuth 2.0 Web application client ID from Google Cloud. |
+| `GOOGLE_CLIENT_SECRET` | Yes (Worker `/internal`) | — | OAuth client secret. Store as a Cloudflare Worker secret. |
+| `OAUTH_KV` | Yes (Worker `/internal`) | — | Workers KV binding used by the OAuth 2.1 provider and short-lived Google authorization state. |
 | `SENTRY_DSN` | No (Worker) | — | Sentry DSN for the Worker's own telemetry (`wrangler secret put SENTRY_DSN`). Unset disables Sentry — use your own DSN if you want telemetry on a self-hosted deployment. |
-| `ALLOWED_EMAIL_DOMAIN` | No (Worker `/internal`) | `sentry.io` | Comma-separated email domain(s) allowed to sign in to `/internal`. Set to your own domain when self-hosting. |
+| `ALLOWED_EMAIL_DOMAIN` | Yes (Worker `/internal`) | — | Comma-separated verified Google email domain(s) allowed to sign in to `/internal`. Empty values fail closed. |
 | `MCP_ALLOWED_HOSTNAMES` | Yes (Worker) | — | Comma-separated hostname allowlist used to validate MCP `Host` headers. |
+| `MCP_PUBLIC_URL` | Yes (Worker `/internal`) | — | Canonical HTTPS Worker origin used to construct the exact Google callback URL. |
 | `MCP_ALLOWED_ORIGIN_HOSTNAMES` | No (Worker `/internal`) | — | Comma-separated browser Origin hostnames allowed to call `/internal`. A present Origin is rejected when the list is empty. |
 
-On the Worker, the `/mcp` endpoint needs no server-side key — each user passes their own via `Authorization: Bearer`. The `/internal` endpoint is fronted by Cloudflare Access Managed OAuth and uses a shared server-side `PLAUSIBLE_API_KEY` secret (see [self-hosting](#setting-up-the-internal-endpoint-cloudflare-access-managed-oauth)).
+On the Worker, the `/mcp` endpoint needs no server-side key — each user passes their own via `Authorization: Bearer`. The `/internal` endpoint uses Google sign-in plus the Worker's OAuth 2.1 provider and a shared server-side `PLAUSIBLE_API_KEY` secret.
 
 ## Plausible API
 
@@ -226,9 +205,11 @@ OPENROUTER_MODEL=openai/gpt-5 OPENROUTER_API_KEY=sk-or-... pnpm eval  # try anot
 ```
 src/
 ├── index.ts              # STDIO entry point (local use)
-├── worker.ts             # Cloudflare Worker entry point (remote)
+├── worker.ts             # Shared Worker MCP handlers
+├── oauth-worker.ts       # OAuth 2.1 Worker entry point (remote)
+├── google-oauth.ts       # Google login, consent, CSRF/state, domain checks
 ├── env.ts                # Worker environment bindings
-├── cf-access.ts          # Verifies the Cloudflare Access assertion on /internal
+├── cf-access.ts          # Legacy verifier retained for upstream tests
 ├── server.ts             # Creates McpServer, registers all tools
 ├── plausible.ts          # PlausibleClient — standalone API client
 ├── schemas.ts            # Shared Zod schemas and filter helpers
@@ -248,10 +229,10 @@ src/
 
 ### Observability & data collection
 
-The Worker reports to Sentry with an endpoint-dependent privacy posture:
+When `SENTRY_DSN` is configured, the Worker reports with an endpoint-dependent privacy posture:
 
 - **`/mcp` (bring-your-own-key)** — fully anonymous. Tool inputs and outputs are **not** recorded (that data belongs to the caller and their own key), no identity is attached, and the ingest-inferred client IP is stripped (`src/redaction.ts`). Only operational telemetry remains: tool names, span timings, and failures.
-- **`/internal` (SSO-gated)** — attributed. Requests carry the authenticated `@sentry.io` email (`Sentry.setUser`), and tool inputs/outputs **are** recorded (`recordToolIO`) for attribution and abuse-tracing on the shared server-side key.
+- **`/internal` (OAuth-gated)** — attributed. Requests carry the authenticated Google email (`Sentry.setUser`), and tool inputs/outputs **are** recorded (`recordToolIO`) for attribution and abuse-tracing on the shared server-side key.
 
 `Authorization` / `Cookie` / `Cf-Access-Jwt-Assertion` headers are stripped from spans on both paths. As a belt-and-suspenders backstop, enable **Prevent Storing of IP Addresses** in the Sentry project's Security & Privacy settings.
 
