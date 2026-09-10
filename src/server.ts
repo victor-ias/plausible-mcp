@@ -5,6 +5,8 @@ import { register as registerTimeseries } from "./tools/get-timeseries.js";
 import { register as registerBreakdown } from "./tools/get-breakdown.js";
 import { register as registerConversions } from "./tools/get-conversions.js";
 import { register as registerComparePeriods } from "./tools/compare-periods.js";
+import { register as registerDetectAnomaly } from "./tools/detect-anomaly.js";
+import { register as registerTrackingHealth } from "./tools/check-tracking-health.js";
 import { register as registerSendFeedback } from "./tools/send-feedback.js";
 
 export interface ServerConfig {
@@ -89,6 +91,8 @@ export function createServer(config: ServerConfig): McpServer {
   registerBreakdown(server, client, config.defaultSiteId);
   registerConversions(server, client, config.defaultSiteId);
   registerComparePeriods(server, client, config.defaultSiteId);
+  registerDetectAnomaly(server, client, config.defaultSiteId);
+  registerTrackingHealth(server, client, config.defaultSiteId);
   if (config.enableFeedbackTool) {
     registerSendFeedback(server);
   }
