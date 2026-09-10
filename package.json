@@ -22,7 +22,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "eval": "tsx evals/run.ts",
-    "deploy": "SENTRY_RELEASE=$(node -p \"require('./package.json').version\") && npx wrangler deploy --outdir .sentry-build --var SENTRY_RELEASE:$SENTRY_RELEASE && npx sentry-cli releases new $SENTRY_RELEASE --org sentry-developer-experience --project plausible-mcp && npx sentry-cli sourcemaps upload --org sentry-developer-experience --project plausible-mcp --release $SENTRY_RELEASE .sentry-build && rm -rf .sentry-build"
+    "deploy": "wrangler deploy"
   },
   "keywords": [
     "mcp",
@@ -46,6 +46,6 @@
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
-    "wrangler": "^4.115.0"
+    "wrangler": "^44.115.0"
   }
 }
