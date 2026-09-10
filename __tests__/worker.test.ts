@@ -546,11 +546,11 @@ describe("MCP Worker entry", () => {
     try {
       await modern.connect(makeTransport());
       expect(modern.getProtocolEra()).toBe("modern");
-      expect((await modern.listTools()).tools).toHaveLength(5);
+      expect((await modern.listTools()).tools).toHaveLength(7);
 
       await legacy.connect(makeTransport());
       expect(legacy.getProtocolEra()).toBe("legacy");
-      expect((await legacy.listTools()).tools).toHaveLength(5);
+      expect((await legacy.listTools()).tools).toHaveLength(7);
     } finally {
       await modern.close();
       await legacy.close();

@@ -49,9 +49,9 @@ export function register(
         site_id: siteIdSchemaFor(defaultSiteId),
         date_range: dateRangeSchema,
         granularity: z
-          .enum(["day", "week", "month"])
+          .enum(["hour", "day", "week", "month"])
           .default("day")
-          .describe("Time bucket size"),
+          .describe("Time bucket size; use hour for intraday monitoring"),
         page: pageSchema,
         metrics: metricsSchema,
         goal: goalSchema,
