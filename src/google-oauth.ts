@@ -8,9 +8,9 @@ const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
 const STATE_PREFIX = "google-oauth-state:";
-const STATE_TTL_SECONDS = 10 * 60;
+const STATE_TTL_SECONDS = 20 * 60;
 const CSRF_COOKIE = "__Host-PLAUSIBLE_MCP_CSRF";
-const STATE_COOKIE = "__Host-PLAUSIBLE_MCP_STATE";
+const STATE_COOKIE_PREFIX = "__Host-PLAUSIBLE_MCP_STATE_";
 
 interface GoogleIdentity {
   sub?: string;
@@ -60,6 +60,12 @@ function readCookie(request: Request, name: string): string | undefined {
 
 function setCookie(name: string, value: string, maxAge = STATE_TTL_SECONDS): string {
   return `${name}=${value}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function stateCookieName(state: string): string | undefined {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(state)
+    ? `${STATE_COOKIE_PREFIX}${state}`
+    : undefined;
 }
 
 function googleCallbackUrl(env: Env): string | undefined {
@@ -178,6 +184,7 @@ async function beginGoogleLogin(
   }
 
   const state = crypto.randomUUID();
+  const cookieName = stateCookieName(state)!;
   await env.OAUTH_KV.put(`${STATE_PREFIX}${state}`, JSON.stringify(oauthRequest), {
     expirationTtl: STATE_TTL_SECONDS,
   });
@@ -192,7 +199,9 @@ async function beginGoogleLogin(
   google.searchParams.set("prompt", "select_account");
 
   const headers = new Headers({ Location: google.href });
-  headers.append("Set-Cookie", setCookie(STATE_COOKIE, stateHash));
+  // A state-specific cookie prevents parallel authorization attempts (for example,
+  // ChatGPT scanning the connector more than once) from overwriting each other.
+  headers.append("Set-Cookie", setCookie(cookieName, stateHash));
   headers.append("Set-Cookie", setCookie(CSRF_COOKIE, "", 0));
   return new Response(null, { status: 302, headers });
 }
@@ -231,7 +240,9 @@ async function finishGoogleLogin(request: Request, env: Env): Promise<Response> 
   const code = url.searchParams.get("code");
   if (!state || !code) return textResponse("Missing Google authorization response.");
 
-  const expectedHash = readCookie(request, STATE_COOKIE);
+  const cookieName = stateCookieName(state);
+  if (!cookieName) return textResponse("Invalid or expired authorization session.");
+  const expectedHash = readCookie(request, cookieName);
   if (!expectedHash || await sha256Hex(state) !== expectedHash) {
     return textResponse("Invalid or expired authorization session.");
   }
@@ -274,7 +285,7 @@ async function finishGoogleLogin(request: Request, env: Env): Promise<Response> 
     } satisfies GoogleAuthProps,
   });
   const headers = new Headers({ Location: redirectTo });
-  headers.set("Set-Cookie", setCookie(STATE_COOKIE, "", 0));
+  headers.set("Set-Cookie", setCookie(cookieName, "", 0));
   return new Response(null, { status: 302, headers });
 }
 
