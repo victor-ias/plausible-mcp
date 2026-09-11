@@ -61,20 +61,15 @@ function makeEnv() {
 async function beginFlow(env: Env) {
   const authorizeUrl = "https://test.local/authorize?client_id=chatgpt";
   const consent = await handleGoogleOAuth(new Request(authorizeUrl), env);
-  const csrf = (await consent!.text()).match(/name="csrf_token" value="([^"]+)"/)?.[1];
-  const csrfCookie = consent!.headers.get("Set-Cookie")?.split(";")[0];
+  const consentToken = (await consent!.text())
+    .match(/name="consent_token" value="([^"]+)"/)?.[1];
   const begin = await handleGoogleOAuth(new Request(authorizeUrl, {
     method: "POST",
-    headers: {
-      Cookie: csrfCookie ?? "",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ csrf_token: csrf ?? "" }),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ consent_token: consentToken ?? "" }),
   }), env);
   const googleUrl = new URL(begin!.headers.get("Location")!);
-  const stateCookie = begin!.headers.get("Set-Cookie")!
-    .match(/__Host-PLAUSIBLE_MCP_STATE_[^=]+=[^;]+/)?.[0];
-  return { begin: begin!, googleUrl, stateCookie };
+  return { begin: begin!, googleUrl, consentToken };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -109,9 +104,9 @@ describe("Google OAuth", () => {
     })).toBe(false);
   });
 
-  it("uses consent + CSRF before redirecting to Google", async () => {
+  it("uses a one-time consent token before redirecting to Google", async () => {
     const { env, kv } = makeEnv();
-    const { begin, googleUrl } = await beginFlow(env);
+    const { begin, googleUrl, consentToken } = await beginFlow(env);
 
     expect(begin.status).toBe(302);
     expect(googleUrl.origin).toBe("https://accounts.google.com");
@@ -120,11 +115,19 @@ describe("Google OAuth", () => {
       .toBe("https://test.local/oauth/google/callback");
     expect(kv.values.has(`google-oauth-state:${googleUrl.searchParams.get("state")}`))
       .toBe(true);
+
+    const replay = await handleGoogleOAuth(new Request("https://test.local/authorize", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ consent_token: consentToken ?? "" }),
+    }), env);
+    expect(replay!.status).toBe(400);
+    expect(await replay!.text()).toContain("Invalid or expired authorization session");
   });
 
   it("finishes authorization only for a verified allowed Google account", async () => {
     const { env, helpers } = makeEnv();
-    const { googleUrl, stateCookie } = await beginFlow(env);
+    const { googleUrl } = await beginFlow(env);
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       if (url.hostname === "oauth2.googleapis.com") {
@@ -144,9 +147,7 @@ describe("Google OAuth", () => {
     const callback = new URL("https://test.local/oauth/google/callback");
     callback.searchParams.set("code", "google-code");
     callback.searchParams.set("state", googleUrl.searchParams.get("state")!);
-    const response = await handleGoogleOAuth(new Request(callback, {
-      headers: { Cookie: stateCookie ?? "" },
-    }), env);
+    const response = await handleGoogleOAuth(new Request(callback), env);
 
     expect(response!.status).toBe(302);
     expect(response!.headers.get("Location")).toContain("chatgpt.com");
@@ -157,14 +158,16 @@ describe("Google OAuth", () => {
     }));
   });
 
-  it("keeps parallel Google authorization sessions independent", async () => {
-    const { env } = makeEnv();
+  it("keeps parallel cookie-free authorization sessions independent", async () => {
+    const { env, kv } = makeEnv();
     const first = await beginFlow(env);
     const second = await beginFlow(env);
 
     expect(first.googleUrl.searchParams.get("state"))
       .not.toBe(second.googleUrl.searchParams.get("state"));
-    expect(first.stateCookie?.split("=")[0])
-      .not.toBe(second.stateCookie?.split("=")[0]);
+    expect(kv.values.has(`google-oauth-state:${first.googleUrl.searchParams.get("state")}`))
+      .toBe(true);
+    expect(kv.values.has(`google-oauth-state:${second.googleUrl.searchParams.get("state")}`))
+      .toBe(true);
   });
 });
