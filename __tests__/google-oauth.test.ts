@@ -73,7 +73,7 @@ async function beginFlow(env: Env) {
   }), env);
   const googleUrl = new URL(begin!.headers.get("Location")!);
   const stateCookie = begin!.headers.get("Set-Cookie")!
-    .match(/__Host-PLAUSIBLE_MCP_STATE=[^;]+/)?.[0];
+    .match(/__Host-PLAUSIBLE_MCP_STATE_[^=]+=[^;]+/)?.[0];
   return { begin: begin!, googleUrl, stateCookie };
 }
 
@@ -155,5 +155,16 @@ describe("Google OAuth", () => {
       scope: ["plausible:read"],
       props: { email: "analyst@inappstory.com", name: "Analyst" },
     }));
+  });
+
+  it("keeps parallel Google authorization sessions independent", async () => {
+    const { env } = makeEnv();
+    const first = await beginFlow(env);
+    const second = await beginFlow(env);
+
+    expect(first.googleUrl.searchParams.get("state"))
+      .not.toBe(second.googleUrl.searchParams.get("state"));
+    expect(first.stateCookie?.split("=")[0])
+      .not.toBe(second.stateCookie?.split("=")[0]);
   });
 });
