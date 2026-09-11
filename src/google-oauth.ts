@@ -7,7 +7,6 @@ import type { Env } from "./env.js";
 const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
-const CONSENT_PREFIX = "oauth-consent:";
 const STATE_PREFIX = "google-oauth-state:";
 const STATE_TTL_SECONDS = 20 * 60;
 
@@ -35,15 +34,6 @@ function securityHeaders(): HeadersInit {
 
 function textResponse(message: string, status = 400): Response {
   return new Response(message, { status, headers: securityHeaders() });
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 function isRandomUuid(value: string): boolean {
@@ -116,63 +106,14 @@ async function parseAuthorizationRequest(
   }
 }
 
-async function renderConsent(
-  request: Request,
-  env: Env,
-  helpers: OAuthHelpers,
-  oauthRequest: AuthRequest,
-): Promise<Response> {
-  const client = oauthRequest.clientId
-    ? await helpers.lookupClient(oauthRequest.clientId)
-    : null;
-  const clientName = escapeHtml(client?.clientName ?? "ChatGPT");
-  const consentToken = crypto.randomUUID();
-  await env.OAUTH_KV.put(`${CONSENT_PREFIX}${consentToken}`, JSON.stringify(oauthRequest), {
-    expirationTtl: STATE_TTL_SECONDS,
-  });
-  const action = escapeHtml(new URL(request.url).pathname);
-  const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize Plausible Analytics</title><style>
-body{font-family:system-ui,sans-serif;background:#f6f7f9;color:#17212b;margin:0;padding:32px}.card{background:white;max-width:520px;margin:8vh auto;padding:32px;border-radius:14px;box-shadow:0 8px 30px #0002}h1{font-size:24px;margin-top:0}p{line-height:1.5}.muted{color:#5d6875}.actions{display:flex;justify-content:flex-end;margin-top:28px}button{background:#1769e0;color:white;border:0;border-radius:8px;padding:11px 18px;font-size:16px;cursor:pointer}
-</style></head><body><main class="card"><h1>Connect Plausible Analytics</h1>
-<p><strong>${clientName}</strong> is requesting read-only access to aggregated analytics for inappstory.com.</p>
-<p class="muted">Continue with your verified @inappstory.com Google account. No Plausible API key is sent to the client.</p>
-<form method="post" action="${action}"><input type="hidden" name="consent_token" value="${consentToken}"><div class="actions"><button type="submit">Continue with Google</button></div></form>
-</main></body></html>`;
-  const headers = new Headers(securityHeaders());
-  headers.set("Content-Type", "text/html; charset=utf-8");
-  return new Response(html, { status: 200, headers });
-}
-
 async function beginGoogleLogin(
-  request: Request,
   env: Env,
+  oauthRequest: AuthRequest,
 ): Promise<Response> {
   const callbackUrl = googleCallbackUrl(env);
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !callbackUrl) {
     return textResponse("Google OAuth is not configured.", 500);
   }
-  const form = await request.formData();
-  const consentToken = form.get("consent_token");
-  if (typeof consentToken !== "string" || !isRandomUuid(consentToken)) {
-    return textResponse("Invalid or expired authorization session.");
-  }
-  const consentKey = `${CONSENT_PREFIX}${consentToken}`;
-  const storedConsent = await env.OAUTH_KV.get(consentKey);
-  if (!storedConsent) return textResponse("Invalid or expired authorization session.");
-  await env.OAUTH_KV.delete(consentKey);
-
-  let oauthRequest: AuthRequest;
-  try {
-    oauthRequest = JSON.parse(storedConsent) as AuthRequest;
-  } catch {
-    return textResponse("Invalid authorization session.", 500);
-  }
-  if (!isAllowedChatGptOAuthRequest(oauthRequest)) {
-    return textResponse("This OAuth client is not allowed.", 403);
-  }
-
   const state = crypto.randomUUID();
   await env.OAUTH_KV.put(`${STATE_PREFIX}${state}`, JSON.stringify(oauthRequest), {
     expirationTtl: STATE_TTL_SECONDS,
@@ -275,10 +216,7 @@ export async function handleGoogleOAuth(
   if (url.pathname === "/authorize" && request.method === "GET") {
     const parsed = await parseAuthorizationRequest(request, env.OAUTH_PROVIDER);
     if (parsed instanceof Response) return parsed;
-    return renderConsent(request, env, env.OAUTH_PROVIDER!, parsed);
-  }
-  if (url.pathname === "/authorize" && request.method === "POST") {
-    return beginGoogleLogin(request, env);
+    return beginGoogleLogin(env, parsed);
   }
   if (url.pathname === "/oauth/google/callback" && request.method === "GET") {
     return finishGoogleLogin(request, env);

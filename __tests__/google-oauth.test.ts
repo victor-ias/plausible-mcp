@@ -41,7 +41,6 @@ function makeEnv() {
   const kv = new MemoryKv();
   const helpers = {
     parseAuthRequest: vi.fn(async () => authRequest()),
-    lookupClient: vi.fn(async () => ({ clientName: "ChatGPT" })),
     completeAuthorization: vi.fn(async () => ({
       redirectTo: "https://chatgpt.com/connector_platform_oauth_redirect?code=local-code",
     })),
@@ -60,16 +59,9 @@ function makeEnv() {
 
 async function beginFlow(env: Env) {
   const authorizeUrl = "https://test.local/authorize?client_id=chatgpt";
-  const consent = await handleGoogleOAuth(new Request(authorizeUrl), env);
-  const consentToken = (await consent!.text())
-    .match(/name="consent_token" value="([^"]+)"/)?.[1];
-  const begin = await handleGoogleOAuth(new Request(authorizeUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ consent_token: consentToken ?? "" }),
-  }), env);
+  const begin = await handleGoogleOAuth(new Request(authorizeUrl), env);
   const googleUrl = new URL(begin!.headers.get("Location")!);
-  return { begin: begin!, googleUrl, consentToken };
+  return { begin: begin!, googleUrl };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -104,9 +96,9 @@ describe("Google OAuth", () => {
     })).toBe(false);
   });
 
-  it("uses a one-time consent token before redirecting to Google", async () => {
+  it("redirects the authorization request directly to Google", async () => {
     const { env, kv } = makeEnv();
-    const { begin, googleUrl, consentToken } = await beginFlow(env);
+    const { begin, googleUrl } = await beginFlow(env);
 
     expect(begin.status).toBe(302);
     expect(googleUrl.origin).toBe("https://accounts.google.com");
@@ -115,14 +107,6 @@ describe("Google OAuth", () => {
       .toBe("https://test.local/oauth/google/callback");
     expect(kv.values.has(`google-oauth-state:${googleUrl.searchParams.get("state")}`))
       .toBe(true);
-
-    const replay = await handleGoogleOAuth(new Request("https://test.local/authorize", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ consent_token: consentToken ?? "" }),
-    }), env);
-    expect(replay!.status).toBe(400);
-    expect(await replay!.text()).toContain("Invalid or expired authorization session");
   });
 
   it("finishes authorization only for a verified allowed Google account", async () => {
