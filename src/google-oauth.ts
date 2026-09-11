@@ -7,10 +7,9 @@ import type { Env } from "./env.js";
 const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
+const CONSENT_PREFIX = "oauth-consent:";
 const STATE_PREFIX = "google-oauth-state:";
 const STATE_TTL_SECONDS = 20 * 60;
-const CSRF_COOKIE = "__Host-PLAUSIBLE_MCP_CSRF";
-const STATE_COOKIE_PREFIX = "__Host-PLAUSIBLE_MCP_STATE_";
 
 interface GoogleIdentity {
   sub?: string;
@@ -47,25 +46,8 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#039;");
 }
 
-function readCookie(request: Request, name: string): string | undefined {
-  const cookie = request.headers.get("Cookie") ?? "";
-  for (const part of cookie.split(";")) {
-    const trimmed = part.trim();
-    if (trimmed.startsWith(`${name}=`)) {
-      return trimmed.slice(name.length + 1);
-    }
-  }
-  return undefined;
-}
-
-function setCookie(name: string, value: string, maxAge = STATE_TTL_SECONDS): string {
-  return `${name}=${value}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
-}
-
-function stateCookieName(state: string): string | undefined {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(state)
-    ? `${STATE_COOKIE_PREFIX}${state}`
-    : undefined;
+function isRandomUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function googleCallbackUrl(env: Env): string | undefined {
@@ -77,13 +59,6 @@ function googleCallbackUrl(env: Env): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 export function parseAllowedEmailDomains(value: string | undefined): string[] {
@@ -143,6 +118,7 @@ async function parseAuthorizationRequest(
 
 async function renderConsent(
   request: Request,
+  env: Env,
   helpers: OAuthHelpers,
   oauthRequest: AuthRequest,
 ): Promise<Response> {
@@ -150,8 +126,11 @@ async function renderConsent(
     ? await helpers.lookupClient(oauthRequest.clientId)
     : null;
   const clientName = escapeHtml(client?.clientName ?? "ChatGPT");
-  const csrf = crypto.randomUUID();
-  const action = escapeHtml(`${new URL(request.url).pathname}${new URL(request.url).search}`);
+  const consentToken = crypto.randomUUID();
+  await env.OAUTH_KV.put(`${CONSENT_PREFIX}${consentToken}`, JSON.stringify(oauthRequest), {
+    expirationTtl: STATE_TTL_SECONDS,
+  });
+  const action = escapeHtml(new URL(request.url).pathname);
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Authorize Plausible Analytics</title><style>
@@ -159,36 +138,45 @@ body{font-family:system-ui,sans-serif;background:#f6f7f9;color:#17212b;margin:0;
 </style></head><body><main class="card"><h1>Connect Plausible Analytics</h1>
 <p><strong>${clientName}</strong> is requesting read-only access to aggregated analytics for inappstory.com.</p>
 <p class="muted">Continue with your verified @inappstory.com Google account. No Plausible API key is sent to the client.</p>
-<form method="post" action="${action}"><input type="hidden" name="csrf_token" value="${csrf}"><div class="actions"><button type="submit">Continue with Google</button></div></form>
+<form method="post" action="${action}"><input type="hidden" name="consent_token" value="${consentToken}"><div class="actions"><button type="submit">Continue with Google</button></div></form>
 </main></body></html>`;
   const headers = new Headers(securityHeaders());
   headers.set("Content-Type", "text/html; charset=utf-8");
-  headers.set("Set-Cookie", setCookie(CSRF_COOKIE, csrf));
   return new Response(html, { status: 200, headers });
 }
 
 async function beginGoogleLogin(
   request: Request,
   env: Env,
-  oauthRequest: AuthRequest,
 ): Promise<Response> {
   const callbackUrl = googleCallbackUrl(env);
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !callbackUrl) {
     return textResponse("Google OAuth is not configured.", 500);
   }
   const form = await request.formData();
-  const submittedCsrf = form.get("csrf_token");
-  const cookieCsrf = readCookie(request, CSRF_COOKIE);
-  if (typeof submittedCsrf !== "string" || !cookieCsrf || submittedCsrf !== cookieCsrf) {
+  const consentToken = form.get("consent_token");
+  if (typeof consentToken !== "string" || !isRandomUuid(consentToken)) {
     return textResponse("Invalid or expired authorization session.");
+  }
+  const consentKey = `${CONSENT_PREFIX}${consentToken}`;
+  const storedConsent = await env.OAUTH_KV.get(consentKey);
+  if (!storedConsent) return textResponse("Invalid or expired authorization session.");
+  await env.OAUTH_KV.delete(consentKey);
+
+  let oauthRequest: AuthRequest;
+  try {
+    oauthRequest = JSON.parse(storedConsent) as AuthRequest;
+  } catch {
+    return textResponse("Invalid authorization session.", 500);
+  }
+  if (!isAllowedChatGptOAuthRequest(oauthRequest)) {
+    return textResponse("This OAuth client is not allowed.", 403);
   }
 
   const state = crypto.randomUUID();
-  const cookieName = stateCookieName(state)!;
   await env.OAUTH_KV.put(`${STATE_PREFIX}${state}`, JSON.stringify(oauthRequest), {
     expirationTtl: STATE_TTL_SECONDS,
   });
-  const stateHash = await sha256Hex(state);
   const google = new URL(GOOGLE_AUTHORIZE_URL);
   google.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
   google.searchParams.set("redirect_uri", callbackUrl);
@@ -199,10 +187,6 @@ async function beginGoogleLogin(
   google.searchParams.set("prompt", "select_account");
 
   const headers = new Headers({ Location: google.href });
-  // A state-specific cookie prevents parallel authorization attempts (for example,
-  // ChatGPT scanning the connector more than once) from overwriting each other.
-  headers.append("Set-Cookie", setCookie(cookieName, stateHash));
-  headers.append("Set-Cookie", setCookie(CSRF_COOKIE, "", 0));
   return new Response(null, { status: 302, headers });
 }
 
@@ -239,11 +223,7 @@ async function finishGoogleLogin(request: Request, env: Env): Promise<Response> 
   const state = url.searchParams.get("state");
   const code = url.searchParams.get("code");
   if (!state || !code) return textResponse("Missing Google authorization response.");
-
-  const cookieName = stateCookieName(state);
-  if (!cookieName) return textResponse("Invalid or expired authorization session.");
-  const expectedHash = readCookie(request, cookieName);
-  if (!expectedHash || await sha256Hex(state) !== expectedHash) {
+  if (!isRandomUuid(state)) {
     return textResponse("Invalid or expired authorization session.");
   }
   const stateKey = `${STATE_PREFIX}${state}`;
@@ -284,9 +264,7 @@ async function finishGoogleLogin(request: Request, env: Env): Promise<Response> 
       name: identity.name ?? identity.email,
     } satisfies GoogleAuthProps,
   });
-  const headers = new Headers({ Location: redirectTo });
-  headers.set("Set-Cookie", setCookie(cookieName, "", 0));
-  return new Response(null, { status: 302, headers });
+  return new Response(null, { status: 302, headers: { Location: redirectTo } });
 }
 
 export async function handleGoogleOAuth(
@@ -297,12 +275,10 @@ export async function handleGoogleOAuth(
   if (url.pathname === "/authorize" && request.method === "GET") {
     const parsed = await parseAuthorizationRequest(request, env.OAUTH_PROVIDER);
     if (parsed instanceof Response) return parsed;
-    return renderConsent(request, env.OAUTH_PROVIDER!, parsed);
+    return renderConsent(request, env, env.OAUTH_PROVIDER!, parsed);
   }
   if (url.pathname === "/authorize" && request.method === "POST") {
-    const parsed = await parseAuthorizationRequest(request, env.OAUTH_PROVIDER);
-    if (parsed instanceof Response) return parsed;
-    return beginGoogleLogin(request, env, parsed);
+    return beginGoogleLogin(request, env);
   }
   if (url.pathname === "/oauth/google/callback" && request.method === "GET") {
     return finishGoogleLogin(request, env);
